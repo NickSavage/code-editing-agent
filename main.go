@@ -38,30 +38,30 @@ type ToolHandler func(toolCall openai.ToolCall) openai.ChatCompletionMessage
 
 // InputManager handles user input with signal management
 type InputManager struct {
-	reader          *bufio.Reader
-	sigChan         chan os.Signal
-	lastCtrlC       time.Time
-	ctrlCPressed    chan bool
-	shouldClear     chan bool
-	shouldExit      chan bool
+	reader       *bufio.Reader
+	sigChan      chan os.Signal
+	lastCtrlC    time.Time
+	ctrlCPressed chan bool
+	shouldClear  chan bool
+	shouldExit   chan bool
 }
 
 // NewInputManager creates a new input manager with signal handling
 func NewInputManager() *InputManager {
 	im := &InputManager{
-		reader:      bufio.NewReader(os.Stdin),
-		sigChan:     make(chan os.Signal, 1),
+		reader:       bufio.NewReader(os.Stdin),
+		sigChan:      make(chan os.Signal, 1),
 		ctrlCPressed: make(chan bool, 1),
-		shouldClear: make(chan bool, 1),
-		shouldExit:  make(chan bool, 1),
+		shouldClear:  make(chan bool, 1),
+		shouldExit:   make(chan bool, 1),
 	}
-	
+
 	// Set up signal handling for Ctrl-C
 	signal.Notify(im.sigChan, syscall.SIGINT)
-	
+
 	// Start signal handler goroutine
 	go im.handleSignals()
-	
+
 	return im
 }
 
@@ -70,14 +70,14 @@ func (im *InputManager) handleSignals() {
 	for {
 		<-im.sigChan
 		now := time.Now()
-		
+
 		// Check if this is a double Ctrl-C (within 2 seconds)
 		if now.Sub(im.lastCtrlC) < 2*time.Second {
 			// Double Ctrl-C, exit
 			im.shouldExit <- true
 			return
 		}
-		
+
 		// Single Ctrl-C, clear input
 		im.lastCtrlC = now
 		im.shouldClear <- true
@@ -88,7 +88,7 @@ func (im *InputManager) handleSignals() {
 func (im *InputManager) GetInput() (string, bool) {
 	inputChan := make(chan string, 1)
 	errorChan := make(chan error, 1)
-	
+
 	// Read input in a goroutine
 	go func() {
 		input, err := im.reader.ReadString('\n')
@@ -98,7 +98,7 @@ func (im *InputManager) GetInput() (string, bool) {
 		}
 		inputChan <- strings.TrimSuffix(input, "\n")
 	}()
-	
+
 	// Wait for input, clear signal, or exit signal
 	select {
 	case input := <-inputChan:
@@ -123,10 +123,10 @@ func (im *InputManager) Cleanup() {
 
 // Agent represents an AI assistant with tool capabilities
 type Agent struct {
-	client         *openai.Client
-	inputManager   *InputManager
-	tools          []openai.Tool
-	toolHandlers   map[string]ToolHandler
+	client       *openai.Client
+	inputManager *InputManager
+	tools        []openai.Tool
+	toolHandlers map[string]ToolHandler
 }
 
 // NewAgent creates a new agent instance
@@ -136,7 +136,7 @@ func NewAgent(client *openai.Client, inputManager *InputManager) *Agent {
 		inputManager: inputManager,
 		toolHandlers: make(map[string]ToolHandler),
 	}
-	
+
 	agent.setupTools()
 	return agent
 }
@@ -279,7 +279,7 @@ func (a *Agent) handleListDir(toolCall openai.ToolCall) openai.ChatCompletionMes
 
 func (a *Agent) handleRecursiveListDir(toolCallID, dirPath string) openai.ChatCompletionMessage {
 	var fileList strings.Builder
-	
+
 	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -339,11 +339,11 @@ func (a *Agent) createErrorResponse(toolCallID, errorMsg string) openai.ChatComp
 // processToolCalls handles all tool calls from the assistant
 func (a *Agent) processToolCalls(toolCalls []openai.ToolCall) []openai.ChatCompletionMessage {
 	var responses []openai.ChatCompletionMessage
-	
+
 	for _, toolCall := range toolCalls {
 		if toolCall.Type == "function" {
 			fmt.Printf("Tool call: %v\n", toolCall.Function.Name)
-			
+
 			if handler, exists := a.toolHandlers[toolCall.Function.Name]; exists {
 				response := handler(toolCall)
 				responses = append(responses, response)
@@ -353,14 +353,12 @@ func (a *Agent) processToolCalls(toolCalls []openai.ToolCall) []openai.ChatCompl
 			}
 		}
 	}
-	
+
 	return responses
 }
 
 // createChatCompletion makes a request to the AI model
 func (a *Agent) createChatCompletion(ctx context.Context, messages []openai.ChatCompletionMessage) (openai.ChatCompletionMessage, error) {
-	fmt.Printf("- Request\n")
-	
 	resp, err := a.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
 		Model:    MODEL,
 		Messages: messages,
@@ -369,7 +367,7 @@ func (a *Agent) createChatCompletion(ctx context.Context, messages []openai.Chat
 	if err != nil {
 		return openai.ChatCompletionMessage{}, err
 	}
-	
+
 	return resp.Choices[0].Message, nil
 }
 
@@ -383,7 +381,7 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	for {
 		// Get user input
-		fmt.Print("\u001b[94mYou\u001b[0m: ")
+		fmt.Print("\n\u001b[94mYou\u001b[0m: ")
 		userInput, ok := a.inputManager.GetInput()
 		if !ok {
 			fmt.Println() // Add newline before exiting
@@ -410,7 +408,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			}
 
 			messages = append(messages, assistantMsg)
-			
+
 			if assistantMsg.Content != "" {
 				fmt.Printf("Assistant: %v\n", assistantMsg.Content)
 			}
