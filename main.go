@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	openai "github.com/sashabaranov/go-openai"
 )
@@ -33,20 +36,105 @@ type WriteFileInput struct {
 // Tool handler function type
 type ToolHandler func(toolCall openai.ToolCall) openai.ChatCompletionMessage
 
+// InputManager handles user input with signal management
+type InputManager struct {
+	reader          *bufio.Reader
+	sigChan         chan os.Signal
+	lastCtrlC       time.Time
+	ctrlCPressed    chan bool
+	shouldClear     chan bool
+	shouldExit      chan bool
+}
+
+// NewInputManager creates a new input manager with signal handling
+func NewInputManager() *InputManager {
+	im := &InputManager{
+		reader:      bufio.NewReader(os.Stdin),
+		sigChan:     make(chan os.Signal, 1),
+		ctrlCPressed: make(chan bool, 1),
+		shouldClear: make(chan bool, 1),
+		shouldExit:  make(chan bool, 1),
+	}
+	
+	// Set up signal handling for Ctrl-C
+	signal.Notify(im.sigChan, syscall.SIGINT)
+	
+	// Start signal handler goroutine
+	go im.handleSignals()
+	
+	return im
+}
+
+// handleSignals processes Ctrl-C signals
+func (im *InputManager) handleSignals() {
+	for {
+		<-im.sigChan
+		now := time.Now()
+		
+		// Check if this is a double Ctrl-C (within 2 seconds)
+		if now.Sub(im.lastCtrlC) < 2*time.Second {
+			// Double Ctrl-C, exit
+			im.shouldExit <- true
+			return
+		}
+		
+		// Single Ctrl-C, clear input
+		im.lastCtrlC = now
+		im.shouldClear <- true
+	}
+}
+
+// GetInput reads user input with Ctrl-C handling
+func (im *InputManager) GetInput() (string, bool) {
+	inputChan := make(chan string, 1)
+	errorChan := make(chan error, 1)
+	
+	// Read input in a goroutine
+	go func() {
+		input, err := im.reader.ReadString('\n')
+		if err != nil {
+			errorChan <- err
+			return
+		}
+		inputChan <- strings.TrimSuffix(input, "\n")
+	}()
+	
+	// Wait for input, clear signal, or exit signal
+	select {
+	case input := <-inputChan:
+		return input, true
+	case <-errorChan:
+		return "", false
+	case <-im.shouldClear:
+		// Clear the current line and return empty string to retry
+		fmt.Print("\r\u001b[K") // Clear line
+		fmt.Print("\u001b[94mYou\u001b[0m: ")
+		return im.GetInput() // Recursive call for new input
+	case <-im.shouldExit:
+		return "", false
+	}
+}
+
+// Cleanup stops signal handling
+func (im *InputManager) Cleanup() {
+	signal.Stop(im.sigChan)
+	close(im.sigChan)
+}
+
 // Agent represents an AI assistant with tool capabilities
 type Agent struct {
 	client         *openai.Client
-	getUserMessage func() (string, bool)
+	inputManager   *InputManager
 	tools          []openai.Tool
 	toolHandlers   map[string]ToolHandler
 }
 
 // NewAgent creates a new agent instance
-func NewAgent(client *openai.Client, getUserMessage func() (string, bool)) *Agent {
+func NewAgent(client *openai.Client, inputManager *InputManager) *Agent {
 	agent := &Agent{
-		client:         client,
-		getUserMessage: getUserMessage,
-		toolHandlers:   make(map[string]ToolHandler),
+		client:       client,
+		inputManager: inputManager,
+		toolHandlers: make(map[string]ToolHandler),
 	}
 	
 	agent.setupTools()
@@ -289,14 +377,22 @@ func (a *Agent) createChatCompletion(ctx context.Context, messages []openai.Chat
 func (a *Agent) Run(ctx context.Context) error {
 	var messages []openai.ChatCompletionMessage
 
-	fmt.Printf("Chat with %v (use 'ctrl-c' to quit)\n", MODEL)
+	fmt.Printf("Chat with %v (single ctrl-c to clear input, double ctrl-c to quit)\n", MODEL)
+
+	defer a.inputManager.Cleanup()
 
 	for {
 		// Get user input
 		fmt.Print("\u001b[94mYou\u001b[0m: ")
-		userInput, ok := a.getUserMessage()
+		userInput, ok := a.inputManager.GetInput()
 		if !ok {
+			fmt.Println() // Add newline before exiting
 			break
+		}
+
+		// Skip empty inputs
+		if strings.TrimSpace(userInput) == "" {
+			continue
 		}
 
 		// Add user message to conversation
@@ -348,17 +444,6 @@ func setupClient() (*openai.Client, error) {
 	return openai.NewClientWithConfig(config), nil
 }
 
-// createUserInputFunc creates a function for getting user input
-func createUserInputFunc() func() (string, bool) {
-	scanner := bufio.NewScanner(os.Stdin)
-	return func() (string, bool) {
-		if !scanner.Scan() {
-			return "", false
-		}
-		return scanner.Text(), true
-	}
-}
-
 func main() {
 	// Setup client
 	client, err := setupClient()
@@ -366,9 +451,11 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// Create input manager
+	inputManager := NewInputManager()
+
 	// Create agent
-	getUserMessage := createUserInputFunc()
-	agent := NewAgent(client, getUserMessage)
+	agent := NewAgent(client, inputManager)
 
 	// Run agent
 	if err := agent.Run(context.Background()); err != nil {
