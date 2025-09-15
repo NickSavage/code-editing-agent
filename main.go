@@ -34,6 +34,10 @@ type WriteFileInput struct {
 	Content string `json:"content" jsonschema_description:"The content to write to the file. This will overwrite the file if it exists."`
 }
 
+type RunAgentInput struct {
+	Task string `json:"task" jsonschema_description:"Description of the task for the agent to perform"`
+}
+
 // Tool handler function type
 type ToolHandler func(toolCall openai.ToolCall) openai.ChatCompletionMessage
 
@@ -150,12 +154,14 @@ func (a *Agent) setupTools() {
 		a.createReadFileTool(),
 		a.createListDirTool(),
 		a.createWriteFileTool(),
+		a.createRunAgentTool(),
 	}
 
 	a.toolHandlers = map[string]ToolHandler{
 		"read_file":     a.handleReadFile,
 		"list_dir":      a.handleListDir,
 		"write_to_file": a.handleWriteFile,
+		"run_agent":     a.handleRunAgent,
 	}
 }
 
@@ -229,6 +235,28 @@ func (a *Agent) createWriteFileTool() openai.Tool {
 		Function: &openai.FunctionDefinition{
 			Name:        "write_to_file",
 			Description: "Write content to a file, overwriting it if it exists.",
+			Parameters:  schema,
+		},
+	}
+}
+
+func (a *Agent) createRunAgentTool() openai.Tool {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"task": map[string]any{
+				"type":        "string",
+				"description": "Description of the task for the agent to perform",
+			},
+		},
+		"required": []string{"task"},
+	}
+
+	return openai.Tool{
+		Type: openai.ToolTypeFunction,
+		Function: &openai.FunctionDefinition{
+			Name:        "run_agent",
+			Description: "Run a new agent instance to handle tasks involving reading and writing files. Use this when you need to perform complex file operations or when the task involves multiple file manipulations that would benefit from a fresh agent context.",
 			Parameters:  schema,
 		},
 	}
@@ -331,6 +359,82 @@ func (a *Agent) handleWriteFile(toolCall openai.ToolCall) openai.ChatCompletionM
 	}
 }
 
+// DriveConversation runs the assistant-tool loop until no tool calls are returned or a safety iteration cap is reached.
+// It appends all generated messages to the provided slice and returns the updated slice.
+func (a *Agent) DriveConversation(ctx context.Context, messages []openai.ChatCompletionMessage, logf func(format string, args ...any)) ([]openai.ChatCompletionMessage, error) {
+	const maxIterations = 10
+	for i := 0; i < maxIterations; i++ {
+		assistantMsg, err := a.createChatCompletion(ctx, messages)
+		if err != nil {
+			return messages, err
+		}
+
+		messages = append(messages, assistantMsg)
+
+		if assistantMsg.Content != "" && logf != nil {
+			logf("Assistant: %s", assistantMsg.Content)
+		}
+
+		if len(assistantMsg.ToolCalls) > 0 {
+			toolResponses := a.processToolCalls(assistantMsg.ToolCalls)
+			messages = append(messages, toolResponses...)
+
+			if logf != nil {
+				for j, toolResponse := range toolResponses {
+					if j < len(assistantMsg.ToolCalls) {
+						logf("Tool used: %s", assistantMsg.ToolCalls[j].Function.Name)
+					}
+					logf("Tool result: %s", toolResponse.Content)
+				}
+			}
+		} else {
+			break
+		}
+	}
+	return messages, nil
+}
+
+func (a *Agent) handleRunAgent(toolCall openai.ToolCall) openai.ChatCompletionMessage {
+	var input RunAgentInput
+	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &input); err != nil {
+		return a.createErrorResponse(toolCall.ID, fmt.Sprintf("Invalid arguments: %v", err))
+	}
+
+	// Create a new agent instance with the same client and model
+	newAgent := &Agent{
+		client:       a.client,
+		inputManager: nil, // No input manager needed for programmatic execution
+		toolHandlers: make(map[string]ToolHandler),
+		model:        a.model,
+	}
+	newAgent.setupTools()
+
+	// Create initial conversation with the task
+	messages := []openai.ChatCompletionMessage{
+		{
+			Role:    openai.ChatMessageRoleUser,
+			Content: input.Task,
+		},
+	}
+
+	var output strings.Builder
+	output.WriteString(fmt.Sprintf("Agent task: %s\n\n", input.Task))
+
+	_, err := newAgent.DriveConversation(context.Background(), messages, func(format string, args ...any) {
+		output.WriteString(fmt.Sprintf(format, args...))
+		output.WriteString("\n")
+	})
+	if err != nil {
+		return a.createErrorResponse(toolCall.ID, fmt.Sprintf("Error in agent execution: %v", err))
+	}
+
+	return openai.ChatCompletionMessage{
+		Role:       openai.ChatMessageRoleTool,
+		Content:    output.String(),
+		ToolCallID: toolCall.ID,
+	}
+}
+
 func (a *Agent) createErrorResponse(toolCallID, errorMsg string) openai.ChatCompletionMessage {
 	return openai.ChatCompletionMessage{
 		Role:       openai.ChatMessageRoleTool,
@@ -402,28 +506,13 @@ func (a *Agent) Run(ctx context.Context) error {
 			Content: userInput,
 		})
 
-		// Main conversation loop
-		for {
-			// Get AI response
-			assistantMsg, err := a.createChatCompletion(ctx, messages)
-			if err != nil {
-				return fmt.Errorf("error creating chat completion: %w", err)
-			}
-
-			messages = append(messages, assistantMsg)
-
-			if assistantMsg.Content != "" {
-				fmt.Printf("Assistant: %v\n", assistantMsg.Content)
-			}
-
-			// Process any tool calls
-			if len(assistantMsg.ToolCalls) > 0 {
-				toolResponses := a.processToolCalls(assistantMsg.ToolCalls)
-				messages = append(messages, toolResponses...)
-			} else {
-				// No tool calls, break inner loop to get next user input
-				break
-			}
+		// Drive the conversation until the model is idle (no more tool calls)
+		var err error
+		messages, err = a.DriveConversation(ctx, messages, func(format string, args ...any) {
+			fmt.Printf(format+"\n", args...)
+		})
+		if err != nil {
+			return fmt.Errorf("error creating chat completion: %w", err)
 		}
 	}
 
