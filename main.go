@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -16,7 +17,7 @@ import (
 	openai "github.com/sashabaranov/go-openai"
 )
 
-const MODEL = "anthropic/claude-sonnet-4"
+const DEFAULT_MODEL = "anthropic/claude-sonnet-4"
 
 // Tool input structures
 type ReadFileInput struct {
@@ -127,14 +128,16 @@ type Agent struct {
 	inputManager *InputManager
 	tools        []openai.Tool
 	toolHandlers map[string]ToolHandler
+	model        string
 }
 
 // NewAgent creates a new agent instance
-func NewAgent(client *openai.Client, inputManager *InputManager) *Agent {
+func NewAgent(client *openai.Client, inputManager *InputManager, model string) *Agent {
 	agent := &Agent{
 		client:       client,
 		inputManager: inputManager,
 		toolHandlers: make(map[string]ToolHandler),
+		model:        model,
 	}
 
 	agent.setupTools()
@@ -360,7 +363,7 @@ func (a *Agent) processToolCalls(toolCalls []openai.ToolCall) []openai.ChatCompl
 // createChatCompletion makes a request to the AI model
 func (a *Agent) createChatCompletion(ctx context.Context, messages []openai.ChatCompletionMessage) (openai.ChatCompletionMessage, error) {
 	resp, err := a.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-		Model:    MODEL,
+		Model:    a.model,
 		Messages: messages,
 		Tools:    a.tools,
 	})
@@ -375,7 +378,7 @@ func (a *Agent) createChatCompletion(ctx context.Context, messages []openai.Chat
 func (a *Agent) Run(ctx context.Context) error {
 	var messages []openai.ChatCompletionMessage
 
-	fmt.Printf("Chat with %v (single ctrl-c to clear input, double ctrl-c to quit)\n", MODEL)
+	fmt.Printf("Chat with %v (single ctrl-c to clear input, double ctrl-c to quit)\n", a.model)
 
 	defer a.inputManager.Cleanup()
 
@@ -442,7 +445,32 @@ func setupClient() (*openai.Client, error) {
 	return openai.NewClientWithConfig(config), nil
 }
 
+// getModel determines the model to use based on CLI args and environment variables
+// Priority: CLI argument > LLM_MODEL env var > DEFAULT_MODEL constant
+func getModel(cliModel *string) string {
+	// If CLI argument is provided and not empty, use it
+	if cliModel != nil && *cliModel != "" {
+		return *cliModel
+	}
+
+	// Check environment variable
+	if envModel := os.Getenv("LLM_MODEL"); envModel != "" {
+		return envModel
+	}
+
+	// Fall back to default
+	return DEFAULT_MODEL
+}
+
 func main() {
+	// Parse CLI arguments
+	modelFlag := flag.String("model", "", "AI model to use (overrides LLM_MODEL env var)")
+	flag.Parse()
+
+	log.Printf("model flag %v", modelFlag)
+	// Determine which model to use
+	model := getModel(modelFlag)
+
 	// Setup client
 	client, err := setupClient()
 	if err != nil {
@@ -452,8 +480,8 @@ func main() {
 	// Create input manager
 	inputManager := NewInputManager()
 
-	// Create agent
-	agent := NewAgent(client, inputManager)
+	// Create agent with specified model
+	agent := NewAgent(client, inputManager, model)
 
 	// Run agent
 	if err := agent.Run(context.Background()); err != nil {
