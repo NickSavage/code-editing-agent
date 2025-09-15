@@ -1,2 +1,34 @@
+# Environment variables
 .env
+
+# Built binaries
 charlie
+*.exe
+
+# Test coverage reports
+coverage.out
+coverage.html
+
+# Test artifacts and temporary files
+testdata/test_write.txt
+testdata/integration_output.txt
+testdata/subagent_output.txt
+testdata/summary.txt
+testdata/temp_explore/
+testdata/new_dir/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -18,6 +19,11 @@ import (
 )
 
 const DEFAULT_MODEL = "anthropic/claude-sonnet-4"
+
+// OpenAIClient interface for mocking
+type OpenAIClient interface {
+	CreateChatCompletion(ctx context.Context, request openai.ChatCompletionRequest) (openai.ChatCompletionResponse, error)
+}
 
 // Tool input structures
 type ReadFileInput struct {
@@ -49,6 +55,7 @@ type InputManager struct {
 	ctrlCPressed chan bool
 	shouldClear  chan bool
 	shouldExit   chan bool
+	cleanupOnce  sync.Once
 }
 
 // NewInputManager creates a new input manager with signal handling
@@ -122,13 +129,15 @@ func (im *InputManager) GetInput() (string, bool) {
 
 // Cleanup stops signal handling
 func (im *InputManager) Cleanup() {
-	signal.Stop(im.sigChan)
-	close(im.sigChan)
+	im.cleanupOnce.Do(func() {
+		signal.Stop(im.sigChan)
+		close(im.sigChan)
+	})
 }
 
 // Agent represents an AI assistant with tool capabilities
 type Agent struct {
-	client       *openai.Client
+	client       OpenAIClient
 	inputManager *InputManager
 	tools        []openai.Tool
 	toolHandlers map[string]ToolHandler
@@ -136,7 +145,7 @@ type Agent struct {
 }
 
 // NewAgent creates a new agent instance
-func NewAgent(client *openai.Client, inputManager *InputManager, model string) *Agent {
+func NewAgent(client OpenAIClient, inputManager *InputManager, model string) *Agent {
 	agent := &Agent{
 		client:       client,
 		inputManager: inputManager,
